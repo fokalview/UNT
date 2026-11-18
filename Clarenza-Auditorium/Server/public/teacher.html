@@ -12,6 +12,7 @@
   header b { letter-spacing:.06em; }
   main { max-width:1040px; margin:0 auto; padding:24px; display:grid; gap:20px; }
   section { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--accent); padding:20px; }
+  #desk, section { min-width:0; overflow-wrap:anywhere; }
   h2 { margin:0 0 12px; font-size:1.2rem; } h3 { margin:16px 0 8px; font-size:1rem; color:var(--accent); }
   label { display:block; font-size:.85rem; color:var(--muted); margin:10px 0 4px; }
   input, select, textarea { width:100%; padding:10px; background:#0a1118; color:var(--ink); border:1px solid var(--line); font:inherit; }
@@ -25,7 +26,7 @@
   .board { background:#06241d; border:6px solid #2c5a45; padding:20px; text-align:center; font-size:1.2rem; white-space:pre-wrap; }
   ul { list-style:none; padding:0; margin:0; display:grid; gap:8px; }
   li { display:flex; justify-content:space-between; gap:12px; align-items:center; border:1px solid var(--line); padding:10px 12px; flex-wrap:wrap; }
-  table { border-collapse:collapse; width:100%; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  table { border-collapse:collapse; width:100%; table-layout:fixed; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
   [hidden] { display:none !important; }
 </style>
 </head>
@@ -98,7 +99,7 @@
 <script>
 'use strict';
 // The token lives in memory only: closing or reloading the tab signs you out.
-let token = '', me = null, live = null, draft = null;
+let token = '', me = null, live = null, draft = null, context = 0, generation = 0, refreshId = 0, hostId = 0;
 const $ = id => document.getElementById(id);
 const say = text => { $('status').textContent = text || ''; };
 async function api(method, route, body) {
@@ -120,35 +121,52 @@ function cells(values) { const tr = document.createElement('tr'); for (const v o
 async function signedIn(account) {
   const teaching = account.memberships.filter(m => m.role === 'owner' || m.role === 'teacher');
   if (!teaching.length) throw new Error('This account is a student account. Use the student view at /student.');
-  token = account.token; me = { ...account, memberships: teaching }; $('password').value = '';
+  resetDesk(); token = account.token; me = { ...account, memberships: teaching }; $('password').value = '';
   $('who').textContent = me.username; $('signin').hidden = true; $('desk').hidden = false;
   $('org').replaceChildren(...teaching.map(m => { const o = document.createElement('option'); o.value = m.orgId; o.textContent = m.name + ' — ' + m.role; return o; }));
   await refresh();
 }
 const org = () => $('org').value;
 const role = () => (me.memberships.find(m => m.orgId === org()) || {}).role;
+function resetDesk() {
+  context++; generation++; refreshId++; hostId++;
+  if (live && live.abort) live.abort.abort(); live = null; draft = null;
+  for (const id of ['livePanel', 'draftBox', 'insightPanel', 'inviteBox']) $(id).hidden = true;
+  for (const id of ['lessonTitle', 'lessonText']) $(id).value = '';
+  for (const id of ['inviteCode', 'liveQuestions', 'insightQuestions', 'insightQuiz', 'draftSections', 'draftQuiz', 'draftTitle', 'draftMode', 'insightCounts', 'members', 'lessons', 'running']) $(id).replaceChildren();
+  $('reviewed').checked = false; $('generate').disabled = $('saveDraft').disabled = $('publish').disabled = false;
+}
 async function refresh() {
+  const request = ++refreshId, current = context, organization = org();
   $('inviteTeacher').hidden = role() !== 'owner'; $('inviteBox').hidden = true;
   const [members, lessons, running] = await Promise.all([api('GET', '/v1/orgs/' + org() + '/members'), api('GET', '/v1/orgs/' + org() + '/lessons'), api('GET', '/v1/orgs/' + org() + '/sessions?state=live')]);
+  if (request !== refreshId || current !== context || organization !== org()) return;
   fill($('members'), members.items.map(m => item(m.username + ' — ' + m.role, [])), 'No members yet.');
   fill($('lessons'), lessons.items.map(l => item((l.scope === 'published' ? '' : '[' + l.scope + '] ') + l.title + ' • v' + l.version,
-    l.scope === 'published' ? [['Start a live class', () => startClass(l.id)], ['Insights', () => showInsights(l.id)]] : [])), 'No lessons yet. Build one below.');
+    l.scope === 'published' ? [['Start a live class', () => startClass(l.id)], ['Insights', () => showInsights(l.id)]] : [['Review draft', () => openDraft(l.id)]])), 'No lessons yet. Build one below.');
   fill($('running'), running.items.filter(s => s.hostId === me.id).map(s => item(s.title, [['Open controls', () => host(s)]])), 'You have no class running.');
 }
 async function invite(asRole) {
+  const current = context;
   const result = await api('POST', '/v1/orgs/' + org() + '/invites', { role: asRole });
+  if (current !== context) return;
   $('inviteBox').hidden = false; $('inviteCode').textContent = result.code;
   $('inviteNote').textContent = 'One-time ' + asRole + ' invite, valid until ' + new Date(result.expiresAt).toLocaleString() + '. It is shown only now. The person enters it on the ' + (asRole === 'student' ? 'student page (/student)' : 'student page (/student) to register, then signs in here') + '.';
 }
 
 // ----- hosting a live class -----
-async function startClass(lessonId) { host(await api('POST', '/v1/orgs/' + org() + '/sessions', { lessonId })); await refresh(); }
+async function startClass(lessonId) { const current = context; const session = await api('POST', '/v1/orgs/' + org() + '/sessions', { lessonId }); if (current !== context) return; await host(session); await refresh(); }
 async function host(session) {
+  const request = ++hostId, current = context;
   if (live && live.abort) live.abort.abort();
   const lesson = await api('GET', '/v1/lessons/' + session.lessonId);
+  if (request !== hostId || current !== context) return;
   const mine = live = { id: session.id, lesson, section: session.section, playing: session.playing, seen: 0, ended: false, present: new Set() };
   $('livePanel').hidden = false; $('liveTitle').textContent = 'Live class — ' + session.title; $('liveQuestions').replaceChildren(); paint();
   $('livePanel').scrollIntoView({ block: 'start' });
+  followHost(mine).catch(e => { if (live === mine) say(e.message); });
+}
+async function followHost(mine) {
   while (live === mine && !mine.ended) {
     mine.abort = new AbortController();
     try {
@@ -163,7 +181,8 @@ async function host(session) {
           const block = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
           if (block.startsWith(':')) continue;
           const type = /^event: (.*)$/m.exec(block)[1], data = JSON.parse(/^data: (.*)$/m.exec(block)[1]);
-          if (type === 'snapshot') { mine.section = data.section; mine.playing = data.playing; mine.ended = data.state === 'ended'; paint(); continue; }
+          if (live !== mine) return;
+          if (type === 'snapshot') { mine.section = data.section; mine.playing = data.playing; mine.ended = data.state === 'ended'; say(''); paint(); continue; }
           if (data.seq <= mine.seen) continue;
           mine.seen = data.seq; if (live === mine) apply(data);
         }
@@ -173,10 +192,12 @@ async function host(session) {
   }
 }
 function paint() {
+  if (!live) return;
   const s = live.lesson.sections[live.section];
   $('liveSection').textContent = (live.section + 1) + ' / ' + live.lesson.sections.length + ' — ' + s.title; $('liveBoard').textContent = s.board;
   $('liveState').textContent = live.ended ? 'Ended. Students can now replay it from Recordings.' : live.playing ? 'Playing' : 'Paused';
   $('present').textContent = live.present.size ? [...live.present].join(', ') : 'No students have joined yet.';
+  for (const button of $('livePanel').querySelectorAll('[data-act]')) button.disabled = live.ended;
 }
 function apply(e) {
   const p = e.payload || {};
@@ -187,18 +208,24 @@ function apply(e) {
   if (e.type === 'left') live.present.delete(p.username);
   if (e.type === 'ended') { live.ended = true; live.playing = false; refresh().catch(() => {}); }
   if (e.type === 'question') {
-    const li = document.createElement('li'), text = document.createElement('span'); text.textContent = p.username + ' (section ' + (p.section + 1) + '): ' + p.text;
+    const li = document.createElement('li'), text = document.createElement('span'); li.dataset.questionId = p.id; text.textContent = p.username + ' (section ' + (p.section + 1) + '): ' + p.text;
     const input = document.createElement('input'); input.setAttribute('aria-label', 'Answer to ' + p.username); input.style.flex = '1 1 240px';
     const b = document.createElement('button'); b.textContent = 'Answer';
     b.onclick = guard(async () => { await api('POST', '/v1/questions/' + p.id + '/answer', { answer: input.value }); input.disabled = b.disabled = true; b.textContent = 'Answered'; });
     li.append(text, input, b); $('liveQuestions').append(li);
+  }
+  if (e.type === 'answer') {
+    const row = [...$('liveQuestions').children].find(li => li.dataset.questionId === p.id);
+    if (row) { row.querySelector('input').value = p.answer; row.querySelector('input').disabled = true; row.querySelector('button').disabled = true; row.querySelector('button').textContent = 'Answered'; }
   }
   paint();
 }
 
 // ----- insights -----
 async function showInsights(lessonId) {
+  const current = context;
   const v = await api('GET', '/v1/orgs/' + org() + '/insights?lesson=' + lessonId);
+  if (current !== context) return;
   $('insightPanel').hidden = false; $('insightTitle').textContent = 'Insights — ' + v.title + ' • v' + v.version;
   $('insightCounts').textContent = v.started + ' learner(s) started, ' + v.completed + ' completed.';
   $('insightQuiz').replaceChildren(...v.questions.map(q => cells([q.question, q.attempts, q.misses, q.attempts ? Math.round(q.missRate * 100) + '%' : '—'])));
@@ -208,33 +235,53 @@ async function showInsights(lessonId) {
 
 // ----- authoring -----
 async function generate() {
+  const current = context, request = ++generation; draft = null; $('draftBox').hidden = true; $('generate').disabled = true;
+  try {
   const sources = $('lessonText').value.split(/\r?\n\s*\r?\n/).map(s => s.trim()).filter(Boolean);
   const job = await api('POST', '/v1/orgs/' + org() + '/jobs', { kind: 'lesson', topic: $('lessonTitle').value, level: $('lessonLevel').value, minutes: 15, sources });
+  if (current !== context || request !== generation) return;
   say('Building the draft…');
   for (let i = 0; i < 120; i++) {
     const j = await api('GET', '/v1/jobs/' + job.id);
+    if (current !== context || request !== generation) return;
     if (j.state === 'failed') throw new Error('The draft could not be built: ' + j.error);
     if (j.state === 'ready') { draft = j.document; break; }
     await new Promise(r => setTimeout(r, 1000));
   }
   if (!draft) throw new Error('The draft is taking too long. Try again with less text.');
+  renderDraft();
+  } finally { if (current === context && request === generation) $('generate').disabled = false; }
+}
+async function openDraft(id) {
+  const current = context, request = ++generation;
+  const document = await api('GET', '/v1/lessons/' + id);
+  if (current !== context || request !== generation) return;
+  draft = document; $('generate').disabled = false; renderDraft();
+}
+function renderDraft() {
   say(''); $('draftBox').hidden = false; $('reviewed').checked = false;
-  $('draftTitle').textContent = draft.title; $('draftMode').textContent = draft.mode + (draft.classType === 'ai' ? ' — written by AI, check it against your source.' : '');
+  $('draftTitle').textContent = draft.title; $('draftMode').textContent = 'Unreviewed draft — ' + draft.mode + (draft.classType === 'ai' ? ' — written by AI, check it against your source.' : '');
   $('draftSections').replaceChildren(...draft.sections.map(s => cells([s.title, s.board, s.narration])));
   $('draftQuiz').textContent = draft.quiz.length ? draft.quiz.length + ' practice question(s): ' + draft.quiz.map(q => q.question + ' → ' + q.options[q.correct]).join(' | ') : 'No practice questions in this draft.';
 }
 async function save(scope) {
   if (!draft) throw new Error('Build a draft first.');
   if (scope === 'published' && !$('reviewed').checked) throw new Error('Tick the review box before publishing.');
-  await api('POST', '/v1/orgs/' + org() + '/lessons', { scope, reviewed: scope === 'published', document: draft });
+  const current = context;
+  if ($('saveDraft').disabled) return;
+  $('saveDraft').disabled = $('publish').disabled = true;
+  try {
+  await api('POST', '/v1/orgs/' + org() + '/lessons', { scope, reviewed: scope === 'published', parentId: draft.id, document: draft });
+  if (current !== context) return;
   draft = null; $('draftBox').hidden = true; say(scope === 'published' ? 'Published. Students can see it now.' : 'Draft saved. Students cannot see it.'); await refresh();
+  } finally { if (current === context) $('saveDraft').disabled = $('publish').disabled = false; }
 }
 
 $('login').onclick = guard(async () => signedIn(await api('POST', '/v1/auth/login', { username: $('username').value, password: $('password').value })));
 $('create').onclick = guard(async () => signedIn(await api('POST', '/v1/auth/register', { username: $('username').value, password: $('password').value, orgName: $('orgName').value })));
-$('refresh').onclick = guard(refresh); $('org').onchange = guard(refresh);
+$('refresh').onclick = guard(refresh); $('org').onchange = guard(async () => { resetDesk(); await refresh(); });
 $('inviteStudent').onclick = guard(() => invite('student')); $('inviteTeacher').onclick = guard(() => invite('teacher'));
-$('signout').onclick = guard(async () => { if (live && live.abort) live.abort.abort(); live = null; await api('POST', '/v1/auth/logout', {}); token = ''; me = null; $('desk').hidden = true; $('livePanel').hidden = true; $('signin').hidden = false; $('who').textContent = 'Not signed in'; });
+$('signout').onclick = guard(async () => { const logout = api('POST', '/v1/auth/logout', {}); resetDesk(); token = ''; me = null; $('desk').hidden = true; $('signin').hidden = false; $('who').textContent = 'Not signed in'; await logout; });
 $('livePanel').onclick = guard(async e => {
   const act = e.target.dataset.act; if (!act || !live) return;
   const body = act === 'prev' ? { action: 'goto', section: Math.max(0, live.section - 1) } : act === 'next' ? { action: 'goto', section: Math.min(live.lesson.sections.length - 1, live.section + 1) } : { action: act };

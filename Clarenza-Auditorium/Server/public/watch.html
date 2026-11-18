@@ -90,7 +90,7 @@
 <script>
 'use strict';
 // The token lives in memory only: closing or reloading the tab signs you out.
-let token = '', me = null, room = null;
+let token = '', me = null, room = null, navigation = 0, refreshId = 0;
 const $ = id => document.getElementById(id);
 const say = text => { $('status').textContent = text || ''; };
 async function api(method, route, body) {
@@ -109,6 +109,7 @@ function item(label, buttons) {
 function fill(list, nodes, empty) { list.replaceChildren(...nodes); if (!nodes.length) { const li = document.createElement('li'); li.textContent = empty; li.className = 'muted'; list.append(li); } }
 
 async function signedIn(account) {
+  closeRoom();
   token = account.token; me = account; $('password').value = ''; $('invite').value = '';
   $('who').textContent = me.username; $('signin').hidden = true; $('browse').hidden = false;
   $('org').replaceChildren(...me.memberships.map(m => { const o = document.createElement('option'); o.value = m.orgId; o.textContent = m.name + ' — ' + m.role; return o; }));
@@ -116,8 +117,10 @@ async function signedIn(account) {
 }
 const role = () => (me.memberships.find(m => m.orgId === $('org').value) || {}).role;
 async function refresh() {
+  const request = ++refreshId, currentToken = token;
   const org = $('org').value; if (!org) return;
   const [live, ended, lessons] = await Promise.all([api('GET', '/v1/orgs/' + org + '/sessions?state=live'), api('GET', '/v1/orgs/' + org + '/sessions?state=ended'), api('GET', '/v1/orgs/' + org + '/lessons')]);
+  if (request !== refreshId || currentToken !== token || org !== $('org').value) return;
   fill($('live'), live.items.map(s => item(s.title, [['Join live', () => openLive(s.id)]])), 'No class is live right now.');
   fill($('ended'), ended.items.map(s => item(s.title + ' — ' + new Date(s.startedAt).toLocaleString(), [['Watch', () => openReplay(s.id)]])), 'No recordings yet.');
   const teach = role() === 'owner' || role() === 'teacher';
@@ -131,26 +134,44 @@ function show(section) {
   if (room.mode === 'self') $('selfWhere').textContent = 'Section ' + (section + 1) + ' of ' + room.lesson.sections.length;
   saveProgress();
 }
+function closeRoom() {
+  navigation++;
+  if (room && room.abort) room.abort.abort(); room = null;
+  $('question').value = ''; $('shared').checked = false; $('ask').disabled = false;
+  $('log').replaceChildren(); $('room').hidden = true;
+}
 // Progress is saved to your account so another device can pick up where you stopped.
 // It fails quietly for a lesson you can only see through a private study party.
 function saveProgress() {
   if (!room || !room.ready) return;
-  api('PUT', '/v1/lessons/' + room.lesson.id + '/progress', { section: room.section, quizIndex: Math.min(room.q, (room.lesson.quiz || []).length), score: room.score, clock: 0, completed: room.done === true }).catch(() => {});
+  const mine = room, savedToken = token;
+  const body = { section: mine.section, quizIndex: Math.min(mine.q, (mine.lesson.quiz || []).length), score: mine.score, clock: 0, completed: mine.done === true };
+  // Serialize writes so an earlier section cannot arrive after a later answer.
+  mine.saving = (mine.saving || Promise.resolve()).then(async () => {
+    if (savedToken !== token) return;
+    await api('PUT', '/v1/lessons/' + mine.lesson.id + '/progress', body);
+  }).catch(() => { if (room === mine) say('Progress could not be saved. Check your connection and try again.'); });
 }
 function renderQuiz() {
   const quiz = room.lesson.quiz || [];
   $('practice').hidden = !quiz.length; if (!quiz.length) return;
   $('pfeedback').textContent = ''; $('pnext').hidden = true; $('popts').replaceChildren();
-  if (room.q >= quiz.length) { $('pq').textContent = 'Practice complete: ' + room.score + ' of ' + quiz.length + ' correct on this visit.'; room.done = true; saveProgress(); return; }
+  if (room.q >= quiz.length) { $('pq').textContent = 'Practice complete: ' + room.score + ' of ' + quiz.length + ' correct.'; room.done = true; saveProgress(); return; }
   const mine = room, index = room.q; $('pq').textContent = (index + 1) + '. ' + quiz[index].question;
   quiz[index].options.forEach((option, i) => {
     const b = document.createElement('button'); b.textContent = option;
     b.onclick = guard(async () => {
+      if (room !== mine || mine.answering || mine.q !== index) return;
+      mine.answering = true;
+      try {
       for (const other of $('popts').children) other.disabled = true;
       const result = await api('POST', '/v1/lessons/' + mine.lesson.id + '/attempts', { question: index, selected: i });
       if (room !== mine) return;
       if (result.correct) mine.score++;
+      mine.q = index + 1; mine.done = mine.q === quiz.length; saveProgress();
       $('pfeedback').textContent = (result.correct ? 'Correct. ' : 'Not quite. ') + result.explanation; $('pnext').hidden = false;
+      } catch (e) { if (room === mine) for (const other of $('popts').children) other.disabled = false; throw e; }
+      finally { mine.answering = false; }
     });
     $('popts').append(b);
   });
@@ -166,28 +187,35 @@ function apply(e) {
   if (e.type === 'left') log(p.username + ' left.');
   if (e.type === 'question') log(p.username + ' asked (section ' + (p.section + 1) + '): ' + p.text);
   if (e.type === 'answer') log(p.username + ' answered: ' + p.answer);
-  if (e.type === 'ended') { room.playing = false; room.live = false; log('Class ended. It is now available as a recording.'); }
+  if (e.type === 'ended') { room.playing = false; room.live = false; if (room.mode === 'live') { $('askBox').hidden = true; $('hostControls').hidden = true; } log('Class ended. It is now available as a recording.'); }
   if (room.mode === 'live') $('roomState').textContent = room.live === false ? 'Ended' : (room.playing ? 'Live — playing' : 'Live — paused') + ' • section ' + (room.section + 1) + ' of ' + room.lesson.sections.length;
 }
-function enter(title, lesson, mode) {
-  room = { lesson, mode, section: 0, playing: false, seen: 0, q: 0, score: 0, done: false, ready: false };
+function enter(title, lesson, mode, saved = {}) {
+  room = { lesson, mode, section: 0, playing: false, seen: 0, q: saved.quizIndex || 0, score: saved.score || 0, done: saved.completed || false, ready: false };
+  $('question').value = ''; $('shared').checked = false; $('ask').disabled = false;
   $('browse').hidden = true; $('room').hidden = false; $('roomTitle').textContent = title; $('log').replaceChildren();
   $('hostControls').hidden = true; $('replayControls').hidden = mode !== 'replay'; $('askBox').hidden = mode !== 'live'; $('selfControls').hidden = mode !== 'self';
-  show(0); renderQuiz(); room.ready = true;
+  show(mode === 'self' ? Math.min(saved.section || 0, lesson.sections.length - 1) : 0); renderQuiz(); room.ready = true;
 }
 // Self-paced study of a published lesson, with no session: you move through it yourself.
 async function openSelf(id) {
+  const current = ++navigation;
   const [lesson, saved] = await Promise.all([api('GET', '/v1/lessons/' + id), api('GET', '/v1/lessons/' + id + '/progress')]);
-  enter(lesson.title, lesson, 'self'); $('roomState').textContent = 'Self-paced — your progress is saved to your account.';
-  if (saved.section > 0) { show(Math.min(saved.section, lesson.sections.length - 1)); log('Resumed at section ' + (room.section + 1) + '.'); }
+  if (current !== navigation) return;
+  enter(lesson.title, lesson, 'self', saved); $('roomState').textContent = 'Self-paced — your progress is saved to your account.'; saveProgress();
+  if (saved.section > 0) log('Resumed at section ' + (room.section + 1) + '.');
 }
 
 async function openLive(id) {
+  const current = ++navigation;
   const session = await api('POST', '/v1/sessions/' + id + '/join', {});
-  const lesson = await api('GET', '/v1/lessons/' + session.lessonId);
-  enter(session.title, lesson, 'live'); room.id = id; room.host = session.hostId === me.id;
+  if (current !== navigation) return;
+  const [lesson, saved, questions] = await Promise.all([api('GET', '/v1/lessons/' + session.lessonId), api('GET', '/v1/lessons/' + session.lessonId + '/progress'), api('GET', '/v1/sessions/' + id + '/questions')]);
+  if (current !== navigation) return;
+  enter(session.title, lesson, 'live', saved); room.id = id; room.host = session.hostId === me.id;
+  for (const q of questions.items.filter(q => !q.shared)) log('Private question (only you): ' + q.text);
   $('hostControls').hidden = !room.host;
-  follow();
+  follow().catch(e => say(e.message));
 }
 // Follows the live stream with fetch so the token goes in a header, never in the URL.
 // On a dropped connection it reconnects with Last-Event-ID and receives only what it missed.
@@ -207,7 +235,8 @@ async function follow() {
           const block = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
           if (block.startsWith(':')) continue;
           const type = /^event: (.*)$/m.exec(block)[1], data = JSON.parse(/^data: (.*)$/m.exec(block)[1]);
-          if (type === 'snapshot') { mine.playing = data.playing; if (data.state === 'ended') mine.live = false; if (!mine.seen) show(data.section); continue; }
+          if (room !== mine) return;
+          if (type === 'snapshot') { mine.playing = data.playing; mine.live = data.state !== 'ended'; show(data.section); say(''); $('roomState').textContent = mine.live ? (mine.playing ? 'Live — playing' : 'Live — paused') + ' • section ' + (mine.section + 1) + ' of ' + mine.lesson.sections.length : 'Ended'; continue; }
           if (data.seq <= mine.seen) continue;
           mine.seen = data.seq; if (room === mine) apply(data);
         }
@@ -219,8 +248,12 @@ async function follow() {
 
 // Replay: the recording is the lesson plus its timed events, played against your own clock.
 async function openReplay(id) {
+  const current = ++navigation;
   const rec = await api('GET', '/v1/sessions/' + id + '/recording');
-  enter(rec.session.title + ' — recording', rec.lesson, 'replay');
+  if (current !== navigation) return;
+  const saved = await api('GET', '/v1/lessons/' + rec.lesson.id + '/progress');
+  if (current !== navigation) return;
+  enter(rec.session.title + ' — recording', rec.lesson, 'replay', saved);
   Object.assign(room, { events: rec.events, t: 0, index: 0, running: false, end: rec.events.length ? rec.events[rec.events.length - 1].at : 0 });
   $('rpSection').replaceChildren(...rec.lesson.sections.map((s, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (i + 1) + '. ' + s.title; return o; }));
   $('rpToggle').textContent = 'Play'; $('roomState').textContent = 'Recording — you control the pace.'; tickClock();
@@ -243,20 +276,20 @@ setInterval(() => {
 
 $('login').onclick = guard(async () => signedIn(await api('POST', '/v1/auth/login', { username: $('username').value, password: $('password').value })));
 $('register').onclick = guard(async () => signedIn(await api('POST', '/v1/auth/register', { username: $('username').value, password: $('password').value, invite: $('invite').value.trim() })));
-$('refresh').onclick = guard(refresh); $('org').onchange = guard(refresh);
-$('signout').onclick = guard(async () => { await api('POST', '/v1/auth/logout', {}); token = ''; me = null; $('browse').hidden = true; $('signin').hidden = false; $('who').textContent = 'Not signed in'; });
+$('refresh').onclick = guard(refresh); $('org').onchange = guard(async () => { closeRoom(); await refresh(); });
+$('signout').onclick = guard(async () => { const logout = api('POST', '/v1/auth/logout', {}); closeRoom(); refreshId++; token = ''; me = null; for (const id of ['live','ended','lessons']) $(id).replaceChildren(); $('browse').hidden = true; $('signin').hidden = false; $('who').textContent = 'Not signed in'; await logout; });
 $('hostControls').onclick = guard(async e => {
   const act = e.target.dataset.act; if (!act) return;
   const body = act === 'prev' ? { action: 'goto', section: Math.max(0, room.section - 1) } : act === 'next' ? { action: 'goto', section: Math.min(room.lesson.sections.length - 1, room.section + 1) } : { action: act };
   await api('POST', '/v1/sessions/' + room.id + '/control', body);
 });
-$('ask').onclick = guard(async () => { const shared = $('shared').checked; await api('POST', '/v1/sessions/' + room.id + '/questions', { text: $('question').value, section: room.section, shared }); $('question').value = ''; say(shared ? 'Question shared with the class.' : 'Question saved privately.'); });
+$('ask').onclick = guard(async () => { const mine = room, shared = $('shared').checked, text = $('question').value; $('ask').disabled = true; try { await api('POST', '/v1/sessions/' + mine.id + '/questions', { text, section: mine.section, shared }); if (room !== mine) return; $('question').value = ''; $('shared').checked = false; if (!shared) log('Private question (only you): ' + text); say(shared ? 'Question shared with the class.' : 'Question saved privately.'); } finally { if (room === mine) $('ask').disabled = false; } });
 $('selfPrev').onclick = () => show(Math.max(0, room.section - 1));
 $('selfNext').onclick = () => show(Math.min(room.lesson.sections.length - 1, room.section + 1));
-$('pnext').onclick = () => { room.q++; renderQuiz(); saveProgress(); };
+$('pnext').onclick = () => { renderQuiz(); saveProgress(); };
 $('rpToggle').onclick = () => { if (room.t >= room.end) seek(0); room.running = !room.running; $('rpToggle').textContent = room.running ? 'Pause' : 'Play'; };
 $('rpSection').onchange = () => { const target = Number($('rpSection').value); const hit = room.events.find(e => (e.type === 'goto' && e.payload.section === target)); seek(target === 0 ? 0 : hit ? hit.at : room.t); if (!hit && target !== 0) { show(target); say('The host did not reach this section in the recording; showing its content.'); } };
-$('leave').onclick = guard(async () => { if (room && room.abort) room.abort.abort(); if (room && room.mode === 'live' && room.live !== false && !room.host) await api('POST', '/v1/sessions/' + room.id + '/leave', {}); room = null; $('room').hidden = true; $('browse').hidden = false; await refresh(); });
+$('leave').onclick = guard(async () => { const mine = room; closeRoom(); $('browse').hidden = false; await mine?.saving; if (mine && mine.mode === 'live' && mine.live !== false && !mine.host) await api('POST', '/v1/sessions/' + mine.id + '/leave', {}); await refresh(); });
 </script>
 </body>
 </html>

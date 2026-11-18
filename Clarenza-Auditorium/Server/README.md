@@ -39,6 +39,22 @@ and students; they register with the invite code, from the watch page or the API
 
 Run the tests with `node --test Server/test/*.test.js`.
 
+To include the real-browser regression, set `CLARENZA_BROWSER` to an installed Chrome or Edge
+executable, then run the same command. It launches a separate headless browser profile and drives
+two tabs through DOM controls, actual HTTP requests and SSE. No npm dependencies are needed.
+Without that variable the browser test explicitly reports **skipped**; the API tests still run.
+Optional `CLARENZA_TEST_ARTIFACTS` names an existing directory for test profiles and screenshots.
+
+Example (PowerShell):
+
+```powershell
+$env:CLARENZA_BROWSER = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+node --test Server/test/*.test.js
+```
+
+See [STAGE-1-VERIFICATION.md](STAGE-1-VERIFICATION.md) for the November 18 browser verification,
+defects fixed, Windows pilot regressions and remaining limits. No dependencies were added.
+
 ## How it works
 
 A class session is a small state record plus an ordered event log (`started`, `joined`, `play`,
@@ -58,6 +74,9 @@ No video is stored.
 - Published versions are immutable. A revision is a new row with the next version; revising from
   a stale parent returns `409`.
 - A private study lesson is visible only to its owner, including from organization owners.
+- Student study-party invite codes do not grant teachers or owners access to another learner's
+  private study lesson, even if they previously participated as a student. Student-to-student
+  invitations retain their existing behavior.
 - Only the host controls a session. An ended session cannot be changed.
 - A question is private unless its author sets `shared: true`. Private questions are never
   broadcast, never in a recording and never in insights.
@@ -118,7 +137,7 @@ its own temporary database and a real HTTP server:
 Each of five deliberately broken rules (host check, lesson privacy, membership check, private
 question broadcast, resume) made a test fail, so the tests do detect those faults.
 
-Not verified:
+Not verified in that original API-only run (see the Stage 1 report for subsequent browser checks):
 
 - The teacher and student pages in a real browser. Their scripts were syntax-checked, every element
   id they use exists, and both pages are served; nobody has clicked through them yet.

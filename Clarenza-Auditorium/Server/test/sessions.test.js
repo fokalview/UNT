@@ -96,6 +96,19 @@ test('invite-only study party stays private', async t => {
   assert.equal((await s.api.post('/v1/sessions/' + party.id + '/join', { code: party.joinCode }, other.token)).status, 200);
   assert.equal((await s.api.get('/v1/sessions/' + party.id + '/recording', other.token)).body.lesson.title, 'My notes');
   assert.equal((await s.api.post('/v1/sessions/' + party.id + '/leave', {}, other.token)).status, 200);
+  // An invite code must not bypass the rule hiding a learner's private study from staff.
+  for (const staff of [teacher, a]) {
+    assert.equal((await s.api.post('/v1/sessions/' + party.id + '/join', { code: party.joinCode }, staff.token)).status, 404);
+    assert.equal((await s.api.get('/v1/sessions/' + party.id + '/recording', staff.token)).status, 404);
+  }
+  // A previous student participant promoted to teacher also loses access to the private lesson.
+  s.app.db.prepare('UPDATE memberships SET role = ? WHERE org_id = ? AND user_id = ?').run('teacher', a.org, other.id);
+  assert.deepEqual((await s.api.get(S + '?state=live', other.token)).body.items, []);
+  assert.equal((await s.api.get('/v1/sessions/' + party.id + '/recording', other.token)).status, 404);
+  assert.equal((await readEvents(s.base, '/v1/sessions/' + party.id + '/events', other.token, () => true)).status, 404);
+  const shared = (await s.api.post('/v1/sessions/' + party.id + '/questions', { text: 'Private study discussion', shared: true }, student.token)).body;
+  assert.equal((await s.api.get('/v1/sessions/' + party.id + '/questions', other.token)).status, 404);
+  assert.equal((await s.api.post('/v1/questions/' + shared.id + '/answer', { answer: 'Staff reply' }, other.token)).status, 404);
 });
 
 test('progress, marked attempts and teacher insights', async t => {

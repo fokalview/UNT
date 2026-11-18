@@ -207,9 +207,16 @@ function createApp(options = {}) {
   }
 
   // ---------- sessions ----------
+  function staffMayReadSession(user, s) {
+    const membership = one('SELECT role FROM memberships WHERE org_id = ? AND user_id = ?', s.org_id, user.id);
+    if (!membership) return false;
+    const lesson = one('SELECT scope, owner_id FROM lessons WHERE id = ?', s.lesson_id);
+    return !(lesson.scope === 'study' && lesson.owner_id !== user.id && canTeach(membership.role));
+  }
   function sessionFor(user, sessionId) {
     const s = one('SELECT * FROM sessions WHERE id = ?', String(sessionId));
     if (!s || !one('SELECT 1 AS x FROM memberships WHERE org_id = ? AND user_id = ?', s.org_id, user.id)) fail(404, 'Not found.');
+    if (!staffMayReadSession(user, s)) fail(404, 'Not found.');
     const isHost = s.host_id === user.id;
     const joined = !!one('SELECT 1 AS x FROM session_members WHERE session_id = ? AND user_id = ?', s.id, user.id);
     if (!isHost && !joined && s.visibility !== 'org') fail(404, 'Not found.');
@@ -256,11 +263,12 @@ function createApp(options = {}) {
     roleIn(user, orgId);
     const state = query.get('state') === 'ended' ? 'ended' : 'live';
     const rows = all('SELECT s.* FROM sessions s WHERE s.org_id = ? AND s.state = ? AND (s.visibility = ? OR s.host_id = ? OR EXISTS (SELECT 1 FROM session_members m WHERE m.session_id = s.id AND m.user_id = ?)) ORDER BY s.started_at DESC LIMIT 200', orgId, state, 'org', user.id, user.id);
-    return { items: rows.map(sessionOut) };
+    return { items: rows.filter(s => staffMayReadSession(user, s)).map(sessionOut) };
   }
   function joinSession(user, sessionId, body) {
     const s = one('SELECT * FROM sessions WHERE id = ?', String(sessionId));
     if (!s || !one('SELECT 1 AS x FROM memberships WHERE org_id = ? AND user_id = ?', s.org_id, user.id)) fail(404, 'Not found.');
+    if (!staffMayReadSession(user, s)) fail(404, 'Not found.');
     const existing = one('SELECT * FROM session_members WHERE session_id = ? AND user_id = ?', s.id, user.id);
     if (s.visibility === 'invite' && !existing && s.host_id !== user.id) {
       limit('join:' + user.id, 20, 60000);
@@ -333,7 +341,7 @@ function createApp(options = {}) {
   function answer(user, questionId, body) {
     const q = one('SELECT * FROM questions WHERE id = ?', String(questionId));
     if (!q || !q.shared) fail(404, 'Not found.');
-    const s = one('SELECT * FROM sessions WHERE id = ?', q.session_id);
+    const { s } = sessionFor(user, q.session_id);
     const role = roleIn(user, q.org_id);
     if (s.host_id !== user.id && !canTeach(role)) fail(403, 'Only the host or a teacher can answer.');
     const reply = text(body.answer, 1, 4000, 'Answer');
