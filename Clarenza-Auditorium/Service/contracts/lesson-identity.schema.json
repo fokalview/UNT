@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LessonIdentity",
+  "type": "object",
+  "description": "Server-owned identity. Save requests cannot set approval or identity. Published versions remain immutable; parentId requests a new owner-only version. Legacy records may lack these fields.",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "familyId": {
+      "type": "string"
+    },
+    "parentId": {
+      "type": "string"
+    },
+    "ownerId": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer"
+    },
+    "approval": {
+      "type": "string"
+    },
+    "approvedBy": {
+      "type": "string"
+    },
+    "approvedAt": {
+      "type": "string"
+    },
+    "classType": {
+      "type": "string"
+    },
+    "sourceOrigin": {
+      "type": "string"
+    }
+  }
+}

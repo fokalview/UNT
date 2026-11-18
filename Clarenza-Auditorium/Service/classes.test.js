@@ -1,0 +1,32 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'clarenza-classes-'));process.env.CLARENZA_DATA_DIR=root;
+const accounts=require('./accounts'),{requestClass}=require('./server');
+const login=(name,role)=>{accounts.addUser(name,'test-password-long',role);return accounts.route('/auth/login',{username:name,password:'test-password-long'}).token;};
+(async()=>{const oldFetch=global.fetch,oldKey=process.env.OPENAI_API_KEY,oldModel=process.env.OPENAI_MODEL;
+try{
+ const teacher=login('teacher','teacher'),student=login('student','student'),other=login('other','student');
+ const doc={title:'Basic electricity',sources:['A closed circuit conducts current. An open switch breaks the circuit.'],sections:[{title:'Switch',narration:'An open switch breaks the circuit.',board:'Open switch: no current',sourceIds:[1]}],quiz:[{question:'What stops current?',options:['Open switch','Closed switch','Wire'],correct:0,explanation:'An open switch breaks the circuit.',sourceIds:[1]}]};
+ const save=(body,t=teacher)=>accounts.route('/catalog/save',body,t);
+ assert.throws(()=>save({scope:'published',document:doc}),/explicitly approve/);
+ const draft=save({scope:'draft',document:{...doc,approval:'teacher-approved',approvedBy:'forged'}});
+ assert.equal(draft.document.approval,'draft');assert.equal(draft.document.approvedBy,'');
+ assert.throws(()=>accounts.route('/catalog/get',{id:draft.id},student),/unavailable/);
+ const published=save({scope:'published',reviewed:true,parentId:draft.id,document:doc});assert.equal(published.document.version,2);
+ const revision=save({scope:'draft',parentId:published.id,document:{...doc,title:'Changed title'}});
+ assert.equal(revision.document.approval,'draft');assert.equal(accounts.route('/catalog/get',{id:published.id},student).title,doc.title);
+ assert.throws(()=>save({scope:'draft',parentId:published.id,document:doc}),/newer version/);
+ assert.throws(()=>save({scope:'study',parentId:published.id,document:doc},student),/owner/);
+ const privateLesson=save({scope:'study',reviewed:true,document:{...doc,approval:'teacher-approved',ownerId:'forged'}},student);
+ assert.equal(privateLesson.document.approval,'unreviewed');assert.notEqual(privateLesson.document.ownerId,'forged');
+ assert.throws(()=>accounts.route('/catalog/get',{id:privateLesson.id},other),/unavailable/);
+ const request={topic:'electricity',level:'Beginner',minutes:15,language:'English',sources:[]};
+ await assert.rejects(()=>requestClass(request,''),/sign in/);
+ await assert.rejects(()=>requestClass({...request,topic:'astronomy'},student),/No approved source/);
+ delete process.env.OPENAI_API_KEY;await assert.rejects(()=>requestClass(request,student),/not configured/);
+ process.env.OPENAI_API_KEY='test-only';process.env.OPENAI_MODEL='test-model';
+ global.fetch=async(url,options)=>{const input=JSON.parse(JSON.parse(options.body).input);assert.equal(input.preferences.topic,'electricity');assert.equal(input.sources[0].text,doc.sources[0]);return {ok:true,json:async()=>({status:'completed',output:[{content:[{type:'output_text',text:JSON.stringify(doc)}]}]})};};
+ const generated=await requestClass(request,student);assert.equal(generated.approval,'unreviewed');assert.match(generated.sourceOrigin,/Teacher source lesson/);assert.deepEqual(generated.sources,doc.sources);
+ global.fetch=async()=>({ok:true,json:async()=>({status:'incomplete'})});await assert.rejects(()=>requestClass(request,student),/did not complete/);
+ console.log('TWO_CLASS_TESTS_PASSED: immutable versions, drafts, approval forgery, ownership, conflict, private isolation, source selection, missing credentials, generated contract and incomplete generation. Provider calls mocked; no live AI claim.');
+}finally{global.fetch=oldFetch;if(oldKey===undefined)delete process.env.OPENAI_API_KEY;else process.env.OPENAI_API_KEY=oldKey;if(oldModel===undefined)delete process.env.OPENAI_MODEL;else process.env.OPENAI_MODEL=oldModel;fs.rmSync(root,{recursive:true,force:true});}
+})().catch(e=>{console.error(e);process.exitCode=1;});

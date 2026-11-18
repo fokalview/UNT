@@ -1,3 +1,12 @@
+# Clarenza
+
+> **Status, November 2026.** The working project is in [`Clarenza-Auditorium/`](Clarenza-Auditorium/): a Windows **desktop** pilot
+> (Unity 2020.1) with a local service, plus a hosted multi-user backend in [`Clarenza-Auditorium/Server/`](Clarenza-Auditorium/Server/README.md).
+> It does not run in a headset yet. The text below this note is the original 2025 concept description and is kept for history.
+>
+> The tracked source covers the project's own scripts, services and settings. The scenes depend on third-party
+> Asset Store packs that are not tracked as source here; the full project archive is `Clarenza-Unity-Project.zip`.
+
 # UNT
 # Clarenza VR Classroom
 

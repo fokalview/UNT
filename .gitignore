@@ -1,0 +1,17 @@
+# Unity generated
+Library/
+Temp/
+Logs/
+obj/
+Build/
+UserSettings/
+*.csproj
+*.sln
+# Third-party asset packs: obtain from the Unity Asset Store, do not commit
+Clarenza-Auditorium/Assets/University Classroom/
+Clarenza-Auditorium/Assets/StudioNewPunch/
+# Hosted service data
+*.db
+*.db-shm
+*.db-wal
+node_modules/
