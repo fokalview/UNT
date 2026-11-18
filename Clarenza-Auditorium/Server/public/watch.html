@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Clarenza — watch a class</title>
+<title>Clarenza — student view</title>
 <style>
   :root { --bg:#090c11; --panel:#0f1620; --line:#1d3340; --ink:#e6f2fa; --muted:#9ec4d6; --accent:#a8d6d9; --btn:#13334a; }
   * { box-sizing: border-box; }
@@ -31,7 +31,7 @@
 </style>
 </head>
 <body>
-<header><b>CLARENZA / Watch</b><span id="who" class="muted">Not signed in</span></header>
+<header><b>CLARENZA / Student</b><span id="who" class="muted">Not signed in</span></header>
 <main>
   <section id="signin">
     <h2>Sign in</h2>
@@ -66,6 +66,13 @@
       <select id="rpSpeed" style="width:auto"><option>0.75</option><option selected>1</option><option>1.5</option><option>2</option></select>
       <label for="rpSection" style="margin:0">Jump to</label><select id="rpSection" style="width:auto"></select>
       <span id="rpClock" class="muted"></span>
+    </div>
+    <div id="selfControls" class="row" hidden><button id="selfPrev">‹ Previous</button><button id="selfNext">Next ›</button><span id="selfWhere" class="muted"></span></div>
+    <div id="practice" hidden>
+      <h2 style="margin-top:16px">Practice</h2>
+      <p id="pq"></p><div id="popts" class="row"></div>
+      <p id="pfeedback" role="status" aria-live="polite"></p>
+      <div class="row"><button id="pnext" hidden>Next question</button></div>
     </div>
     <div id="askBox" hidden>
       <label for="question">Ask a question</label><textarea id="question" rows="2"></textarea>
@@ -114,13 +121,39 @@ async function refresh() {
   fill($('live'), live.items.map(s => item(s.title, [['Join live', () => openLive(s.id)]])), 'No class is live right now.');
   fill($('ended'), ended.items.map(s => item(s.title + ' — ' + new Date(s.startedAt).toLocaleString(), [['Watch', () => openReplay(s.id)]])), 'No recordings yet.');
   const teach = role() === 'owner' || role() === 'teacher';
-  fill($('lessons'), lessons.items.filter(l => l.scope === 'published').map(l => item(l.title + ' • v' + l.version, teach ? [['Start a live class', async () => { const s = await api('POST', '/v1/orgs/' + org + '/sessions', { lessonId: l.id }); await openLive(s.id); }]] : [])), 'No published lessons yet.');
+  fill($('lessons'), lessons.items.filter(l => l.scope === 'published').map(l => item(l.title + ' • v' + l.version, [['Study at my own pace', () => openSelf(l.id)]].concat(teach ? [['Start a live class', async () => { const s = await api('POST', '/v1/orgs/' + org + '/sessions', { lessonId: l.id }); await openLive(s.id); }]] : []))), 'No published lessons yet.');
 }
 
 function show(section) {
   if (!room) return;
   room.section = section; const s = room.lesson.sections[section];
   $('boardTitle').textContent = s.title; $('boardText').textContent = s.board; $('narration').textContent = s.narration;
+  if (room.mode === 'self') $('selfWhere').textContent = 'Section ' + (section + 1) + ' of ' + room.lesson.sections.length;
+  saveProgress();
+}
+// Progress is saved to your account so another device can pick up where you stopped.
+// It fails quietly for a lesson you can only see through a private study party.
+function saveProgress() {
+  if (!room || !room.ready) return;
+  api('PUT', '/v1/lessons/' + room.lesson.id + '/progress', { section: room.section, quizIndex: Math.min(room.q, (room.lesson.quiz || []).length), score: room.score, clock: 0, completed: room.done === true }).catch(() => {});
+}
+function renderQuiz() {
+  const quiz = room.lesson.quiz || [];
+  $('practice').hidden = !quiz.length; if (!quiz.length) return;
+  $('pfeedback').textContent = ''; $('pnext').hidden = true; $('popts').replaceChildren();
+  if (room.q >= quiz.length) { $('pq').textContent = 'Practice complete: ' + room.score + ' of ' + quiz.length + ' correct on this visit.'; room.done = true; saveProgress(); return; }
+  const mine = room, index = room.q; $('pq').textContent = (index + 1) + '. ' + quiz[index].question;
+  quiz[index].options.forEach((option, i) => {
+    const b = document.createElement('button'); b.textContent = option;
+    b.onclick = guard(async () => {
+      for (const other of $('popts').children) other.disabled = true;
+      const result = await api('POST', '/v1/lessons/' + mine.lesson.id + '/attempts', { question: index, selected: i });
+      if (room !== mine) return;
+      if (result.correct) mine.score++;
+      $('pfeedback').textContent = (result.correct ? 'Correct. ' : 'Not quite. ') + result.explanation; $('pnext').hidden = false;
+    });
+    $('popts').append(b);
+  });
 }
 function log(line) { const p = document.createElement('div'); p.textContent = line; $('log').prepend(p); }
 function apply(e) {
@@ -137,10 +170,16 @@ function apply(e) {
   if (room.mode === 'live') $('roomState').textContent = room.live === false ? 'Ended' : (room.playing ? 'Live — playing' : 'Live — paused') + ' • section ' + (room.section + 1) + ' of ' + room.lesson.sections.length;
 }
 function enter(title, lesson, mode) {
-  room = { lesson, mode, section: 0, playing: false, seen: 0 };
+  room = { lesson, mode, section: 0, playing: false, seen: 0, q: 0, score: 0, done: false, ready: false };
   $('browse').hidden = true; $('room').hidden = false; $('roomTitle').textContent = title; $('log').replaceChildren();
-  $('hostControls').hidden = true; $('replayControls').hidden = mode !== 'replay'; $('askBox').hidden = mode !== 'live';
-  show(0);
+  $('hostControls').hidden = true; $('replayControls').hidden = mode !== 'replay'; $('askBox').hidden = mode !== 'live'; $('selfControls').hidden = mode !== 'self';
+  show(0); renderQuiz(); room.ready = true;
+}
+// Self-paced study of a published lesson, with no session: you move through it yourself.
+async function openSelf(id) {
+  const [lesson, saved] = await Promise.all([api('GET', '/v1/lessons/' + id), api('GET', '/v1/lessons/' + id + '/progress')]);
+  enter(lesson.title, lesson, 'self'); $('roomState').textContent = 'Self-paced — your progress is saved to your account.';
+  if (saved.section > 0) { show(Math.min(saved.section, lesson.sections.length - 1)); log('Resumed at section ' + (room.section + 1) + '.'); }
 }
 
 async function openLive(id) {
@@ -212,6 +251,9 @@ $('hostControls').onclick = guard(async e => {
   await api('POST', '/v1/sessions/' + room.id + '/control', body);
 });
 $('ask').onclick = guard(async () => { const shared = $('shared').checked; await api('POST', '/v1/sessions/' + room.id + '/questions', { text: $('question').value, section: room.section, shared }); $('question').value = ''; say(shared ? 'Question shared with the class.' : 'Question saved privately.'); });
+$('selfPrev').onclick = () => show(Math.max(0, room.section - 1));
+$('selfNext').onclick = () => show(Math.min(room.lesson.sections.length - 1, room.section + 1));
+$('pnext').onclick = () => { room.q++; renderQuiz(); saveProgress(); };
 $('rpToggle').onclick = () => { if (room.t >= room.end) seek(0); room.running = !room.running; $('rpToggle').textContent = room.running ? 'Pause' : 'Play'; };
 $('rpSection').onchange = () => { const target = Number($('rpSection').value); const hit = room.events.find(e => (e.type === 'goto' && e.payload.section === target)); seek(target === 0 ? 0 : hit ? hit.at : room.t); if (!hit && target !== 0) { show(target); say('The host did not reach this section in the recording; showing its content.'); } };
 $('leave').onclick = guard(async () => { if (room && room.abort) room.abort.abort(); if (room && room.mode === 'live' && room.live !== false && !room.host) await api('POST', '/v1/sessions/' + room.id + '/leave', {}); room = null; $('room').hidden = true; $('browse').hidden = false; await refresh(); });

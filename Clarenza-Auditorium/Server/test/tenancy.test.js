@@ -116,5 +116,9 @@ test('sign-in survives a restart; cross-site and malformed requests are refused'
   assert.equal((await second.api.post('/v1/orgs', { name: 'Evil org' }, a.token, { Origin: 'https://evil.example' })).status, 403);
   const raw = await fetch(second.base + '/v1/orgs', { method: 'POST', headers: { Authorization: 'Bearer ' + a.token, 'Content-Type': 'text/plain' }, body: '{}' });
   assert.equal(raw.status, 415);
-  const page = await fetch(second.base + '/watch'); assert.equal(page.status, 200); assert.match(await page.text(), /Clarenza/);
+  for (const [route, marker] of [['/watch', /CLARENZA \/ Student/], ['/student', /CLARENZA \/ Student/], ['/', /CLARENZA \/ Student/], ['/teacher', /CLARENZA \/ Teacher/]]) {
+    const page = await fetch(second.base + route); assert.equal(page.status, 200, route); assert.match(await page.text(), marker);
+    assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
+  }
+  assert.equal((await fetch(second.base + '/teacher/../app.js')).status, 404);
 });

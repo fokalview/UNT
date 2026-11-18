@@ -17,7 +17,14 @@ Requires Node.js 22.5 or newer. No `npm install`: it uses only Node built-ins (`
 node Server/server.js
 ```
 
-Then open http://127.0.0.1:8787/watch.
+Then open one of the two views:
+
+- **Teacher view**, http://127.0.0.1:8787/teacher — create an organization, invite teachers and students,
+  build a lesson from pasted source text, review and publish it, start and control a live class, answer
+  shared questions, and read insights per lesson.
+- **Student view**, http://127.0.0.1:8787/student — join with an invite, follow a live class, replay a
+  recording at your own speed, study a published lesson at your own pace, take the practice quiz, ask
+  private or shared questions. Progress is saved to the account.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -62,7 +69,7 @@ No video is stored.
 
 ## Routes
 
-All bodies are JSON. All routes except register, login, `/health` and `/watch` need
+All bodies are JSON. All routes except register, login, `/health` and the two pages need
 `Authorization: Bearer <token>`.
 
 | Method and path | Purpose |
@@ -113,8 +120,8 @@ question broadcast, resume) made a test fail, so the tests do detect those fault
 
 Not verified:
 
-- The watch page in a real browser. Its script was syntax-checked and the page is served; nobody
-  has clicked through it yet.
+- The teacher and student pages in a real browser. Their scripts were syntax-checked, every element
+  id they use exists, and both pages are served; nobody has clicked through them yet.
 - The OpenAI generator against the real API. No key was used and no paid call was made.
 - HTTPS, a reverse proxy, load, many concurrent streams, or more than one server process.
   Rate limits and stream fan-out live in one process's memory.

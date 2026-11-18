@@ -431,7 +431,8 @@ function createApp(options = {}) {
   route('POST', '/v1/orgs/:org/jobs', c => createJob(c.user, c.p.org, c.body));
   route('GET', '/v1/jobs/:id', c => getJob(c.user, c.p.id));
 
-  const watchPage = path.join(__dirname, 'public', 'watch.html');
+  // Student view (/student, also / and /watch) and teacher view (/teacher).
+  const pages = { '/': 'watch.html', '/watch': 'watch.html', '/student': 'watch.html', '/teacher': 'teacher.html' };
   async function readBody(req) {
     if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) fail(415, 'Send application/json.');
     const chunks = []; let size = 0;
@@ -444,8 +445,8 @@ function createApp(options = {}) {
     const url = new URL(req.url, 'http://local');
     try {
       if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ready: true, service: 'clarenza-hosted', version: 1 });
-      if (req.method === 'GET' && (url.pathname === '/watch' || url.pathname === '/')) {
-        const page = fs.readFileSync(watchPage);
+      if (req.method === 'GET' && pages[url.pathname]) {
+        const page = fs.readFileSync(path.join(__dirname, 'public', pages[url.pathname]));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'", 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY' });
         return res.end(page);
       }
